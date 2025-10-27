@@ -53,5 +53,26 @@ def login():
         return jsonify({'token': token}), 200
     return jsonify({'message': 'Invalid credentials'}), 401
 
+@app.route('/search_books', methods=['GET'])
+def search_books():
+    keyword = request.args.get('keyword', '')
+    cur = mysql.connection.cursor()
+    query = """
+        SELECT title, author, price_buy, price_rent, availability
+        FROM books
+        WHERE title LIKE %s OR author LIKE %s
+    """
+    like_keyword = f"%{keyword}%"
+    cur.execute(query, (like_keyword, like_keyword))
+    results = cur.fetchall()
+    cur.close()
+    # Return as list of dicts
+    books = [
+        {"title": r[0], "author": r[1], "price_buy": r[2], "price_rent": r[3], "availability": r[4]}
+        for r in results
+    ]
+    return jsonify({"books": books})
+
+
 if __name__ == '__main__':
     app.run(debug=True)
