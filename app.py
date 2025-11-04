@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import messagebox
+import requests
 import mysql.connector
 
 # Connect to local MySQL
@@ -7,12 +8,11 @@ db = mysql.connector.connect(
     host="localhost",
     user="root",
     password="sunitha80",
-    database="project"  # make sure this matches your database name
+    database="project"
 )
 
-import tkinter as tk
-from tkinter import messagebox
-import requests
+cart = []   # local cart
+jwt_token = None
 
 def register_user():
     username = entry_reg_username.get()
@@ -35,6 +35,7 @@ def register_user():
         messagebox.showerror("Error", response.json().get("message", "Registration failed"))
 
 def login_user():
+    global jwt_token
     username = entry_login_username.get()
     password = entry_login_password.get()
     response = requests.post("http://localhost:5000/login", json={
@@ -42,12 +43,12 @@ def login_user():
         "password": password
     })
     if response.status_code == 200:
+        jwt_token = response.json()['token']
         entry_login_username.delete(0, tk.END)
         entry_login_password.delete(0, tk.END)
         show_customer_page(username)
     else:
         messagebox.showerror("Error", response.json().get("message", "Login failed"))
-
 
 def show_success_screen(msg):
     success = tk.Toplevel(root)
@@ -86,12 +87,86 @@ def show_customer_page(username):
 
     tk.Button(search_frame, text="Search", command=search_books).grid(row=0, column=2, padx=5)
 
-    tk.Button(customer_window, text="View Orders", command=lambda: messagebox.showinfo("Feature", "Coming soon!")).pack(pady=5)
+    # ------------------ CART FUNCTIONS ------------------ #
+
+    def add_to_cart():
+        selection = results_list.get(tk.ACTIVE)
+        if not selection:
+            messagebox.showerror("Error", "Select a book first")
+            return
+        
+        title = selection.split(" | ")[0]
+
+        choice = tk.messagebox.askquestion("Choose Option", "Do you want to BUY this book?\nClick No to RENT.")
+        buy_or_rent = "buy" if choice == "yes" else "rent"
+
+        resp = requests.get("http://localhost:5000/get_book", params={"title": title})
+        if resp.status_code != 200:
+            messagebox.showerror("Error", "Book not found")
+            return
+
+        data = resp.json()
+        price = data["price_buy"] if buy_or_rent == "buy" else data["price_rent"]
+
+        cart.append({
+            "title": title,
+            "book_id": data["book_id"],
+            "type": buy_or_rent,
+            "price": price
+        })
+
+        messagebox.showinfo("Cart", f"{title} added to cart as {buy_or_rent.upper()}.")
+
+    def open_cart_window():
+        cart_window = tk.Toplevel(customer_window)
+        cart_window.title("My Cart")
+
+        tk.Label(cart_window, text="Items in Cart", font=("Arial", 14)).pack(pady=5)
+
+        cart_list = tk.Listbox(cart_window, width=60)
+        cart_list.pack(padx=10, pady=10)
+
+        for item in cart:
+            cart_list.insert(tk.END, f"{item['title']} | {item['type']} | ${item['price']}")
+
+        def remove_item():
+            idx = cart_list.curselection()
+            if not idx:
+                return
+            cart.pop(idx[0])
+            cart_list.delete(idx[0])
+
+        def place_order():
+            if not cart:
+                messagebox.showerror("Error", "Cart is empty")
+                return
+            
+            items = [{"book_id": i["book_id"], "type": i["type"]} for i in cart]
+
+            res = requests.post(
+                "http://localhost:5000/place_order",
+                json={"items": items},
+                headers={"Authorization": f"Bearer {jwt_token}"}
+            )
+
+            if res.status_code == 200:
+                messagebox.showinfo("Success", "Order placed successfully!")
+                cart.clear()
+                cart_window.destroy()
+            else:
+                messagebox.showerror("Error", "Failed to place order")
+
+        tk.Button(cart_window, text="Remove Selected", command=remove_item).pack(pady=5)
+        tk.Button(cart_window, text="Place Order", command=place_order).pack(pady=5)
+
+    # Buttons
+    tk.Button(customer_window, text="Add to Cart", command=add_to_cart).pack(pady=5)
+    tk.Button(customer_window, text="View Cart / Checkout", command=open_cart_window).pack(pady=5)
     tk.Button(customer_window, text="Logout", command=lambda: logout(customer_window)).pack(pady=10)
 
 def logout(customer_window):
     customer_window.destroy()
-    root.deiconify()  # show login window again
+    root.deiconify()
 
 root = tk.Tk()
 root.title("Bookstore App Login/Registration")
