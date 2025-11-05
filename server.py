@@ -1,5 +1,7 @@
 
-
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from flask import Flask, request, jsonify
 from flask_mysqldb import MySQL
 from flask_bcrypt import Bcrypt
@@ -100,88 +102,132 @@ def get_book():
     return jsonify({"message": "Book not found"}), 404
 
 # ---------------- PLACE ORDER ----------------
+
+def send_bill_email(to_email, subject, html_body):
+    smtp_server = 'smtp.gmail.com'
+    smtp_port = 587
+    smtp_user = 'sshreyan9@gmail.com'
+    smtp_password = 'haqyumnyzkkhftjz'  
+
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = subject 
+    msg['From'] = smtp_user
+    msg['To'] = to_email
+
+    msg.attach(MIMEText(html_body, 'html'))
+
+    server = smtplib.SMTP(smtp_server, smtp_port)
+    server.starttls()
+    server.login(smtp_user, smtp_password)
+    server.sendmail(smtp_user, to_email, msg.as_string())
+    server.quit()
+
+def build_html_bill(order_id, order_date, items, total):
+    rows = ""
+    for item in items:
+        rows += f"<tr><td>{item['title']}</td><td>{item['type'].capitalize()}</td><td>${item['price']:.2f}</td></tr>"
+    html = f"""
+    <html>
+    <body>
+        <h2 style="color:#2c3e50;">Your Bookstore Receipt</h2>
+        <p><strong>Order ID: </strong>{order_id}</p>
+        <p><strong>Date: </strong>{order_date}</p>
+        <table style="border-collapse:collapse;width:70%;">
+            <thead>
+                <tr>
+                    <th style="border:1px solid #ddd;padding:8px;">Title</th>
+                    <th style="border:1px solid #ddd;padding:8px;">Type</th>
+                    <th style="border:1px solid #ddd;padding:8px;">Price</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows}
+            </tbody>
+        </table>
+        <h3 style="color:#16a085;">Total: ${total:.2f}</h3>
+    </body>
+    </html>
+    """
+    return html
+
+
 @app.route('/place_order', methods=['POST'])
 @jwt_required()
 def place_order():
-    # Safely parse JSON and validate payload
     data = request.get_json(silent=True) or {}
     items = data.get('items')
-
     if not isinstance(items, list) or not items:
         return jsonify({"error": "Invalid request: 'items' must be a non-empty list"}), 400
 
-    # get_jwt_identity() is a string (user id), convert to int
     user_id = int(get_jwt_identity())
-    # If you need role for authorization:
-    # role = get_jwt().get('role')
-
     cur = mysql.connection.cursor()
     try:
-        # Create the order
         cur.execute("INSERT INTO orders (user_id, status, total_amount) VALUES (%s, 'Pending', 0)", (user_id,))
         order_id = cur.lastrowid
 
         total = 0
+        bill_items = []
         for item in items:
             book_id = item.get("book_id")
             order_type = item.get("type")
-
             if not book_id or order_type not in ("buy", "rent"):
                 mysql.connection.rollback()
                 cur.close()
-                return jsonify({"error": "Each item must include 'book_id' and 'type' ('buy' or 'rent')"}), 400
+                return jsonify({"error": "Each item must include 'book_id' and 'type'"}), 400
 
             price_field = "price_buy" if order_type == "buy" else "price_rent"
-            cur.execute(f"SELECT {price_field}, availability FROM books WHERE id=%s", (book_id,))
+            cur.execute(f"SELECT title, {price_field}, availability FROM books WHERE id=%s", (book_id,))
             row = cur.fetchone()
             if not row:
                 mysql.connection.rollback()
                 cur.close()
                 return jsonify({"error": f"Book id {book_id} not found"}), 404
-
-            price, availability = row
+            title, price, availability = row
             if not availability:
                 mysql.connection.rollback()
                 cur.close()
                 return jsonify({"error": f"Book id {book_id} is not available"}), 409
 
             total += price
+            bill_items.append({
+                "title": title,
+                "type": order_type,
+                "price": float(price)
+            })
 
             cur.execute("""
                 INSERT INTO order_items (order_id, book_id, type, price)
                 VALUES (%s, %s, %s, %s)
             """, (order_id, book_id, order_type, price))
 
-        # Update total and commit
         cur.execute("UPDATE orders SET total_amount=%s WHERE id=%s", (total, order_id))
         mysql.connection.commit()
+
+        # Get order date and user email for the receipt
+        cur.execute("SELECT order_date FROM orders WHERE id=%s", (order_id,))
+        order_date = cur.fetchone()[0].strftime('%Y-%m-%d %H:%M:%S')
+        cur.execute("SELECT email FROM users WHERE id=%s", (user_id,))
+        user_email = cur.fetchone()[0]
         cur.close()
 
-        return jsonify({"message": "Order placed successfully", "order_id": order_id, "total": float(total)}), 200
+        # Generate bill HTML and send email
+        html_bill = build_html_bill(order_id, order_date, bill_items, total)
+        subject = f"Your Bookstore Receipt (Order #{order_id})"
+        send_bill_email(user_email, subject, html_bill)
+
+        return jsonify({
+            "message": "Order placed and bill emailed successfully",
+            "order_id": order_id,
+            "total": float(total)
+        }), 200
 
     except Exception as e:
         mysql.connection.rollback()
         cur.close()
         return jsonify({"error": "Failed to place order", "details": str(e)}), 500
 
+
 # ---------------- RUN SERVER ----------------
-
-# Debug handler to see why 422 is happening
-import traceback
-
-@app.errorhandler(422)
-def handle_unprocessable_entity(err):
-    print("---- 422 DEBUG ----")
-    print("Request data:", request.get_data(as_text=True))
-    print("Request headers:", dict(request.headers))
-    traceback.print_exc()
-    print("--------------------")
-
-    try:
-        exc = err.exc
-        return jsonify({"error": str(exc)}), 422
-    except:
-        return jsonify({"error": "Invalid request or JWT"}), 422
 
 if __name__ == '__main__':
     print("✅ Flask server running with JWT header auth")
