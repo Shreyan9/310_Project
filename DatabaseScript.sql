@@ -13,7 +13,7 @@ CREATE TABLE books (
     author VARCHAR(255) NOT NULL,
     price_buy DECIMAL(10,2) NOT NULL,
     price_rent DECIMAL(10,2) NOT NULL,
-    availability BOOLEAN DEFAULT TRUE
+    availability INT DEFAULT 0
 );
 
 CREATE TABLE orders (

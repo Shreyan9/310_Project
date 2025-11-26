@@ -1,4 +1,3 @@
-
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -63,9 +62,171 @@ def login():
     if user and bcrypt.check_password_hash(user[1], password):
         # Use a string identity; put role into additional claims to avoid 422 on protected routes
         token = create_access_token(identity=str(user[0]), additional_claims={'role': user[2]})
-        return jsonify({'token': token}), 200
+        return jsonify({'token': token, 'role': user[2]}), 200
 
     return jsonify({'message': 'Invalid credentials'}), 401
+
+# ---------------- MANAGER LOGIN ----------------
+@app.route('/manager_login', methods=['POST'])
+def manager_login():
+    data = request.get_json()
+    username = data['username']
+    password = data['password']
+
+    cur = mysql.connection.cursor()
+    cur.execute("SELECT id, password_hash, role FROM users WHERE username=%s AND role='manager'", (username,))
+    user = cur.fetchone()
+    cur.close()
+
+    if user and bcrypt.check_password_hash(user[1], password):
+        token = create_access_token(identity=str(user[0]), additional_claims={'role': 'manager'})
+        return jsonify({'token': token}), 200
+
+    return jsonify({'message': 'Invalid manager credentials'}), 401
+
+# ---------------- VIEW ALL ORDERS (MANAGER ONLY) ----------------
+@app.route('/view_all_orders', methods=['GET'])
+@jwt_required()
+def view_all_orders():
+    claims = get_jwt()
+    if claims.get('role') != 'manager':
+        return jsonify({'message': 'Access denied. Manager privileges required.'}), 403
+
+    cur = mysql.connection.cursor()
+    cur.execute("""
+        SELECT o.id, u.username, o.order_date, o.status, o.total_amount
+        FROM orders o
+        JOIN users u ON o.user_id = u.id
+        ORDER BY o.order_date DESC
+    """)
+    orders = cur.fetchall()
+    
+    order_list = []
+    for order in orders:
+        cur.execute("""
+            SELECT b.title, oi.type, oi.price
+            FROM order_items oi
+            JOIN books b ON oi.book_id = b.id
+            WHERE oi.order_id = %s
+        """, (order[0],))
+        items = cur.fetchall()
+        
+        order_list.append({
+            'order_id': order[0],
+            'username': order[1],
+            'order_date': order[2].strftime('%Y-%m-%d %H:%M:%S'),
+            'status': order[3],
+            'total_amount': float(order[4]),
+            'items': [{'title': item[0], 'type': item[1], 'price': float(item[2])} for item in items]
+        })
+    
+    cur.close()
+    return jsonify({'orders': order_list}), 200
+
+# ---------------- UPDATE ORDER STATUS (MANAGER ONLY) ----------------
+@app.route('/update_order_status', methods=['POST'])
+@jwt_required()
+def update_order_status():
+    claims = get_jwt()
+    if claims.get('role') != 'manager':
+        return jsonify({'message': 'Access denied. Manager privileges required.'}), 403
+
+    data = request.get_json()
+    order_id = data.get('order_id')
+    new_status = data.get('status')
+
+    if new_status not in ('Pending', 'Paid'):
+        return jsonify({'message': 'Invalid status. Must be "Pending" or "Paid".'}), 400
+
+    cur = mysql.connection.cursor()
+    cur.execute("UPDATE orders SET status=%s WHERE id=%s", (new_status, order_id))
+    mysql.connection.commit()
+    
+    if cur.rowcount == 0:
+        cur.close()
+        return jsonify({'message': 'Order not found'}), 404
+    
+    cur.close()
+    return jsonify({'message': f'Order {order_id} status updated to {new_status}'}), 200
+
+# ---------------- ADD NEW BOOK (MANAGER ONLY) ----------------
+@app.route('/add_book', methods=['POST'])
+@jwt_required()
+def add_book():
+    claims = get_jwt()
+    if claims.get('role') != 'manager':
+        return jsonify({'message': 'Access denied. Manager privileges required.'}), 403
+
+    data = request.get_json()
+    title = data.get('title')
+    author = data.get('author')
+    price_buy = data.get('price_buy')
+    price_rent = data.get('price_rent')
+    availability = data.get('availability', 1)
+
+    if not all([title, author, price_buy, price_rent]):
+        return jsonify({'message': 'All fields are required'}), 400
+
+    cur = mysql.connection.cursor()
+    cur.execute("""
+        INSERT INTO books (title, author, price_buy, price_rent, availability)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (title, author, price_buy, price_rent, availability))
+    mysql.connection.commit()
+    cur.close()
+
+    return jsonify({'message': 'Book added successfully'}), 201
+
+# ---------------- UPDATE BOOK (MANAGER ONLY) ----------------
+@app.route('/update_book', methods=['POST'])
+@jwt_required()
+def update_book():
+    claims = get_jwt()
+    if claims.get('role') != 'manager':
+        return jsonify({'message': 'Access denied. Manager privileges required.'}), 403
+
+    data = request.get_json()
+    book_id = data.get('book_id')
+    
+    if not book_id:
+        return jsonify({'message': 'Book ID is required'}), 400
+
+    # Build dynamic update query based on provided fields
+    update_fields = []
+    params = []
+    
+    if 'title' in data:
+        update_fields.append("title=%s")
+        params.append(data['title'])
+    if 'author' in data:
+        update_fields.append("author=%s")
+        params.append(data['author'])
+    if 'price_buy' in data:
+        update_fields.append("price_buy=%s")
+        params.append(data['price_buy'])
+    if 'price_rent' in data:
+        update_fields.append("price_rent=%s")
+        params.append(data['price_rent'])
+    if 'availability' in data:
+        update_fields.append("availability=%s")
+        params.append(data['availability'])
+    
+    if not update_fields:
+        return jsonify({'message': 'No fields to update'}), 400
+    
+    params.append(book_id)
+    query = f"UPDATE books SET {', '.join(update_fields)} WHERE id=%s"
+    
+    cur = mysql.connection.cursor()
+    cur.execute(query, params)
+    mysql.connection.commit()
+    
+    if cur.rowcount == 0:
+        cur.close()
+        return jsonify({'message': 'Book not found'}), 404
+    
+    cur.close()
+    return jsonify({'message': 'Book updated successfully'}), 200
 
 # ---------------- SEARCH BOOKS ----------------
 @app.route('/search_books', methods=['GET'])
@@ -73,7 +234,7 @@ def search_books():
     keyword = request.args.get('keyword', '')
     cur = mysql.connection.cursor()
     query = """
-        SELECT title, author, price_buy, price_rent, availability
+        SELECT id, title, author, price_buy, price_rent, availability
         FROM books
         WHERE title LIKE %s OR author LIKE %s
     """
@@ -83,7 +244,7 @@ def search_books():
     cur.close()
 
     books = [
-        {"title": r[0], "author": r[1], "price_buy": r[2], "price_rent": r[3], "availability": r[4]}
+        {"id": r[0], "title": r[1], "author": r[2], "price_buy": r[3], "price_rent": r[4], "availability": r[5]}
         for r in results
     ]
     return jsonify({"books": books})
